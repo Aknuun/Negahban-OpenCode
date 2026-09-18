@@ -82,6 +82,26 @@ func TestRenumberAfterDelete(t *testing.T) {
 	}
 }
 
+func TestDeactivateKeepsSession(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{BaseURL: "http://127.0.0.1:1", StateFile: dir + "/state.json"}
+	b := newBot(cfg, nil)
+	b.users.states[1] = &UserState{
+		UserID:    1,
+		Sessions:  []string{"a", "b"},
+		Labels:    map[string]string{"a": "۱", "b": "۲"},
+		SessionID: "b",
+	}
+	b.users.deactivate(1, "b")
+	st := b.users.states[1]
+	if st.SessionID != "" {
+		t.Fatalf("active should be cleared, got %q", st.SessionID)
+	}
+	if len(st.Sessions) != 2 {
+		t.Fatalf("sessions should be kept, got %v", st.Sessions)
+	}
+}
+
 func TestSetSessionLabelMarksManual(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{BaseURL: "http://127.0.0.1:1", StateFile: dir + "/state.json"}

@@ -120,3 +120,28 @@ func TestDeleteSession404IsOK(t *testing.T) {
 		t.Fatalf("404 should be swallowed, got %v", err)
 	}
 }
+
+func TestSummarize(t *testing.T) {
+	var gotProvider, gotModel string
+	_, c := startTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/session/ses_1/summarize" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		gotProvider, _ = body["providerID"].(string)
+		gotModel, _ = body["modelID"].(string)
+		io.WriteString(w, `true`)
+	})
+	if err := c.Summarize(context.Background(), "ses_1", "deepseek", "deepseek-flash"); err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider != "deepseek" || gotModel != "deepseek-flash" {
+		t.Fatalf("body provider=%q model=%q", gotProvider, gotModel)
+	}
+	if err := c.Summarize(context.Background(), "ses_1", "", ""); err == nil {
+		t.Fatal("expected error when provider/model missing")
+	}
+}

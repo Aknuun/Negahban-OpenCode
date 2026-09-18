@@ -92,6 +92,9 @@ func (f *fakeOC) ListMessages(ctx context.Context, sessionID string, limit int) 
 	return nil, nil
 }
 func (f *fakeOC) Abort(ctx context.Context, sessionID string) error { return nil }
+func (f *fakeOC) Summarize(ctx context.Context, sessionID, providerID, modelID string) error {
+	return nil
+}
 func (f *fakeOC) ListQuestions(ctx context.Context) ([]occlient.QuestionRequest, error) {
 	return nil, nil
 }

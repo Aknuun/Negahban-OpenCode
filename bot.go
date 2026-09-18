@@ -30,6 +30,7 @@ type ocAPI interface {
 	LastMessage(context.Context, string) (*occlient.Message, error)
 	ListMessages(context.Context, string, int) ([]occlient.Message, error)
 	Abort(context.Context, string) error
+	Summarize(context.Context, string, string, string) error
 	ListQuestions(context.Context) ([]occlient.QuestionRequest, error)
 	ReplyQuestion(context.Context, string, [][]string) error
 	RejectQuestion(context.Context, string) error
@@ -61,10 +62,12 @@ const helpText = `ربات کنترل opencode روی سرور
 
 حین اجرا پاسخ به‌صورت زنده به‌روز می‌شود؛ روی پیام «در حال انجام» دکمهٔ ⏹ توقف همان نشست است.
 
+در پیام وضعیت و پایان هر چت، دکمه‌های سریع نشست هست: 🗜 فشرده‌سازی (کاهش مصرف توکن)، ✖️ بستن نشست و 🗑 حذف نشست.
+
 اگر مدل در میانهٔ کار سؤالی بپرسد (مثل خود CLI)، همان پیام گزینه‌ها را دارد؛ با دکمه‌ها پاسخ بده تا اجرا ادامه یابد. ✏️ یعنی می‌توانی پاسخ خودت را تایپ کنی.`
 
 // botVersion نسخهٔ ربات است؛ هنگام انتشار نسخهٔ جدید آن را به‌روز کن
-const botVersion = "v8.12"
+const botVersion = "v8.13"
 
 const (
 	btnStatus    = "وضعیت و هزینه"
@@ -530,6 +533,20 @@ func (b *Bot) sendProgress(chatID int64, text string, sid string) (int, error) {
 	return m.MessageID, nil
 }
 
+// sendInline پیامی با کیبورد شیشه‌ای می‌فرستد (کیبورد ثابت پایین صفحه دست‌نخورده
+// می‌ماند). برای دکمه‌هایی مثل فشرده‌سازی/بستن/حذف نشست.
+func (b *Bot) sendInline(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) (int, error) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	if kb != nil {
+		msg.ReplyMarkup = kb
+	}
+	m, err := b.api.Send(msg)
+	if err != nil {
+		return 0, err
+	}
+	return m.MessageID, nil
+}
+
 func (b *Bot) edit(chatID int64, msgID int, text string) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	b.api.Send(edit)
@@ -683,6 +700,8 @@ var cbRoutes = []cbRoute{
 	{prefix: "cnt:", run: continueAction},
 	{prefix: "pk:", run: peakAction},
 	{prefix: "ds:", run: deleteSessionAction},
+	{prefix: "cmp:", run: compactAction},
+	{prefix: "close:", run: closeSessionAction},
 }
 
 func settingsAction(b *Bot, cq *tgbotapi.CallbackQuery) {
@@ -721,6 +740,88 @@ func deleteSessionAction(b *Bot, cq *tgbotapi.CallbackQuery) {
 	}
 	b.deleteSession(userID, sid)
 	b.editKeyboard(chatID, cq.Message.MessageID, "🗑 نشست حذف شد.", &tgbotapi.InlineKeyboardMarkup{})
+}
+
+// compactTimeout مهلت فشرده‌سازی (summarize) است؛ چون خودش یک فراخوانی LLM
+// است ممکن است چند دقیقه طول بکشد.
+const compactTimeout = 10 * time.Minute
+
+// compactAction دکمهٔ «فشرده‌سازی» را انجام می‌دهد: نشست را روی سرور opencode
+// خلاصه می‌کند تا مصرف توکنِ ادامهٔ گفتگو کاهش یابد.
+func compactAction(b *Bot, cq *tgbotapi.CallbackQuery) {
+	sid := strings.TrimPrefix(cq.Data, "cmp:")
+	chatID := cq.Message.Chat.ID
+	if sid == "" {
+		return
+	}
+	userID := b.userForChat(chatID)
+	if userID == 0 {
+		return
+	}
+	providerID, modelID := b.sessionProviderModel(sid)
+	if providerID == "" || modelID == "" {
+		b.editKeyboard(chatID, cq.Message.MessageID,
+			"❌ مدل نشست مشخص نیست؛ برای فشرده‌سازی مدل لازم است.", &tgbotapi.InlineKeyboardMarkup{})
+		return
+	}
+	msgID, err := b.sendInline(chatID, "🗜 در حال فشرده‌سازی نشست… (ممکن است کمی طول بکشد)", nil)
+	if err != nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), compactTimeout)
+		defer cancel()
+		if err := b.oc.Summarize(ctx, sid, providerID, modelID); err != nil {
+			b.edit(chatID, msgID, "❌ فشرده‌سازی ناموفق بود: "+err.Error())
+			return
+		}
+		b.edit(chatID, msgID, "✅ نشست فشرده شد؛ مصرف توکنِ ادامهٔ گفتگو کم می‌شود.")
+	}()
+}
+
+// closeSessionAction دکمهٔ «بستن نشست» را انجام می‌دهد: اجرای در جریان آن
+// متوقف و نشست از حالت فعال خارج می‌شود، ولی روی سرور باقی می‌ماند.
+func closeSessionAction(b *Bot, cq *tgbotapi.CallbackQuery) {
+	sid := strings.TrimPrefix(cq.Data, "close:")
+	chatID := cq.Message.Chat.ID
+	if sid == "" {
+		return
+	}
+	userID := b.userForChat(chatID)
+	if userID == 0 {
+		return
+	}
+	b.stopRun(sid)
+	b.users.deactivate(userID, sid)
+	b.editKeyboard(chatID, cq.Message.MessageID,
+		"✖️ نشست بسته شد؛ پیام بعدی یک نشست تازه می‌سازد.\nاین نشست روی سرور باقی است و از 🗂 نشست‌ها می‌توانی برگردی.",
+		&tgbotapi.InlineKeyboardMarkup{})
+}
+
+// sessionProviderModel پروایدر و مدلِ یک نشست را برای عملیات‌هایی مثل فشرده‌سازی
+// برمی‌گرداند؛ اگر روی نشست تنظیم نشده باشد به مدل کانفیگ برمی‌گردد.
+func (b *Bot) sessionProviderModel(sid string) (providerID, modelID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if s, err := b.oc.GetSession(ctx, sid); err == nil && s != nil {
+		providerID, modelID = s.Model.ProviderID, s.Model.ID
+		if modelID == "" {
+			modelID = s.ModelID
+		}
+	}
+	if providerID == "" || modelID == "" {
+		if full := b.envFor().currentModel(); full != "" {
+			if pid, mid, ok := strings.Cut(full, "/"); ok {
+				if providerID == "" {
+					providerID = pid
+				}
+				if modelID == "" {
+					modelID = mid
+				}
+			}
+		}
+	}
+	return providerID, modelID
 }
 
 func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
@@ -897,7 +998,18 @@ func (b *Bot) showStatus(userID, chatID int64) {
 	msg += fmt.Sprintf("توکن خروجی: %d\n", s.Tokens.Output)
 	msg += fmt.Sprintf("جمع توکن: %s\n", abbrev(s.Tokens.Input+s.Tokens.Output))
 	msg += fmt.Sprintf("هزینه: %s", b.costText(s.Cost))
-	b.send(chatID, msg)
+	b.sendInline(chatID, msg, sessionQuickMarkup(s.ID))
+}
+
+// sessionQuickMarkup دکمه‌های سریع مدیریت نشست (فشرده‌سازی/بستن/حذف) را می‌سازد.
+func sessionQuickMarkup(sid string) *tgbotapi.InlineKeyboardMarkup {
+	return rowsOf(
+		[]tgbotapi.InlineKeyboardButton{
+			inlineBtn("🗜 فشرده‌سازی", "cmp:"+sid),
+			inlineBtn("✖️ بستن نشست", "close:"+sid),
+		},
+		[]tgbotapi.InlineKeyboardButton{inlineBtn("🗑 حذف این نشست", "ds:"+sid)},
+	)
 }
 
 // abortAllRuns همهٔ اجرای‌های فعال را متوقف می‌کند (بعد از تغییر مدل)
@@ -1242,17 +1354,15 @@ func (b *Bot) sendRunSummary(r *runCtl, res pollResult, pre usage, preOK bool) {
 	b.sendSummaryWithDelete(r.ChatID, sb.String(), r.SID)
 }
 
-// deleteWindow مدت باقی‌ماندن دکمهٔ حذف نشست در پایان چت است؛ اگر کاربر در این
-// بازه نزند، نشست باقی می‌ماند و دکمه برداشته می‌شود.
-const deleteWindow = 10 * time.Second
+// deleteWindow مدت باقی‌ماندن دکمه‌های سریعِ پایان چت (فشرده‌سازی/بستن/حذف نشست)
+// است؛ اگر کاربر در این بازه نزند، دکمه‌ها برداشته می‌شوند و نشست باقی می‌ماند.
+const deleteWindow = 60 * time.Second
 
-// sendSummaryWithDelete پیامِ پایان چت را با دکمهٔ حذف نشست می‌فرستد و بعد از
-// deleteWindow دکمه را برمی‌دارد. اگر کاربر دکمه را بزند، حذف انجام می‌شود.
+// sendSummaryWithDelete پیامِ پایان چت را با دکمه‌های فشرده‌سازی/بستن/حذف نشست
+// می‌فرستد و بعد از deleteWindow دکمه‌ها را برمی‌دارد.
 func (b *Bot) sendSummaryWithDelete(chatID int64, text, sid string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ReplyMarkup = rowsOf([]tgbotapi.InlineKeyboardButton{
-		inlineBtn("🗑 حذف این نشست", "ds:"+sid),
-	})
+	msg.ReplyMarkup = sessionQuickMarkup(sid)
 	m, err := b.api.Send(msg)
 	if err != nil || m.MessageID == 0 {
 		return

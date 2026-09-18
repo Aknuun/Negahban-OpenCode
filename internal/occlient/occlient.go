@@ -99,6 +99,7 @@ type Client struct {
 	base   string
 	agent  string
 	client *http.Client
+	long   *http.Client // برای عملیات طولانی مثل فشرده‌سازی (summarize)
 }
 
 func New(base, agent string) *Client {
@@ -108,10 +109,17 @@ func New(base, agent string) *Client {
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		long: &http.Client{
+			Timeout: 10 * time.Minute,
+		},
 	}
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
+	return c.doJSONWith(ctx, c.client, method, path, body, out)
+}
+
+func (c *Client) doJSONWith(ctx context.Context, hc *http.Client, method, path string, body any, out any) error {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -125,7 +133,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return err
 	}
@@ -222,6 +230,18 @@ func (c *Client) ListMessages(ctx context.Context, sessionID string, limit int) 
 func (c *Client) Abort(ctx context.Context, sessionID string) error {
 	return c.doJSON(ctx, http.MethodPost,
 		"/session/"+url.PathEscape(sessionID)+"/abort", nil, nil)
+}
+
+// Summarize نشست را فشرده می‌کند (خلاصه‌سازی تاریخچه برای کاهش مصرف توکن).
+// چون خودِ خلاصه‌سازی یک فراخوانی LLM است ممکن است طول بکشد؛ از کلاینت
+// بلندمدت استفاده می‌کند و مهلت را context تعیین می‌کند.
+func (c *Client) Summarize(ctx context.Context, sessionID, providerID, modelID string) error {
+	if providerID == "" || modelID == "" {
+		return fmt.Errorf("summarize: providerID و modelID لازم است")
+	}
+	body := map[string]any{"providerID": providerID, "modelID": modelID}
+	return c.doJSONWith(ctx, c.long, http.MethodPost,
+		"/session/"+url.PathEscape(sessionID)+"/summarize", body, nil)
 }
 
 func (c *Client) ListQuestions(ctx context.Context) ([]QuestionRequest, error) {

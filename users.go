@@ -219,6 +219,21 @@ func (u *userStore) manualLabel(userID int64, sid string) (string, bool) {
 	return st.Labels[sid], true
 }
 
+// deactivate نشست فعال را غیرفعال می‌کند بدون حذف از فهرست یا سرور؛ پیام بعدی
+// نشست تازه می‌سازد و کاربر بعداً با مدیر نشست‌ها می‌تواند به آن برگردد.
+func (u *userStore) deactivate(userID int64, sid string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	st := u.states[userID]
+	if st == nil {
+		return
+	}
+	if st.SessionID == sid {
+		st.SessionID = ""
+		u.saver.MarkDirty()
+	}
+}
+
 // remove نشست را از فهرست کاربر حذف می‌کند (بدون دست زدن به اجرا/سرور).
 func (u *userStore) remove(userID int64, sid string) {
 	u.mu.Lock()
