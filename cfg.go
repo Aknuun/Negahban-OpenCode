@@ -21,6 +21,17 @@ type ocEnv struct {
 	Port      string // پورت سرور opencode (برای شناسایی سرویس)
 }
 
+// keylessProviders پروایدرهایی که خودِ opencode هستند و به API key نیاز ندارند
+// (مثل opencode/big-pickle). برایشان نباید هشدار «کلید ندارد» نمایش داده شود.
+var keylessProviders = map[string]bool{
+	"opencode": true,
+}
+
+// isKeyless آیا این پروایدر بدون کلید API کار می‌کند؟
+func (e *ocEnv) isKeyless(provider string) bool {
+	return keylessProviders[provider]
+}
+
 var (
 	reModelLine = regexp.MustCompile(`^([ \t]{0,2})"(model|small_model)"[ \t]*:[ \t]*"[^"]*"(.*)$`)
 	reModelVal  = regexp.MustCompile(`^([ \t]{0,2})"(model|small_model)"[ \t]*:[ \t]*"([^"]*)"(.*)$`)
@@ -163,6 +174,9 @@ func (e *ocEnv) providersConfigured() []string {
 }
 
 func (e *ocEnv) hasKey(provider string) bool {
+	if e.isKeyless(provider) {
+		return true
+	}
 	m, err := e.readAuth()
 	if err == nil {
 		if v, ok := m[provider]; ok && v != nil && v["key"] != "" {

@@ -103,7 +103,11 @@ func (b *Bot) settingsSummary(env *ocEnv, userID, chatID int64) string {
 	}
 	providers := env.providersConfigured()
 	if len(providers) == 0 {
-		sb.WriteString("🔑 کلید API: <i>هیچ کلیدی ست نشده</i>\n")
+		if pid != "" && env.isKeyless(pid) {
+			sb.WriteString("🔑 کلید API: <i>پروایدر " + pid + " به کلید نیاز ندارد</i>\n")
+		} else {
+			sb.WriteString("🔑 کلید API: <i>هیچ کلیدی ست نشده</i>\n")
+		}
 	} else {
 		has := env.hasKey(pid)
 		state := ""
