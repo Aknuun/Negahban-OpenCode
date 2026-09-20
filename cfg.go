@@ -91,6 +91,8 @@ func portOf(raw string) string {
 }
 
 // detectOCService پیدا کردن سرویس systemd در حال اجرای opencode serve
+// مهم: هرگز نباید سرویسِ خودِ ربات (negahban-opencode) را برگرداند، چون
+// ری‌استارت آن یعنی خاموش شدن ربات وسط عملیات (signal: terminated).
 func detectOCService(port string) string {
 	out, err := exec.Command("systemctl", "--no-legend", "list-units", "--type=service", "--state=running").Output()
 	if err != nil {
@@ -104,15 +106,31 @@ func detectOCService(port string) string {
 		}
 		cands = append(cands, f[0])
 	}
-	// ترجیح سرویسی که روی همان پورت BaseURL گوش می‌دهد
-	for _, u := range cands {
+	execOf := func(u string) string {
 		es, _ := exec.Command("systemctl", "show", "-p", "ExecStart", u).Output()
-		if port != "" && strings.Contains(string(es), ":"+port) {
+		return string(es)
+	}
+	// اول سرویس‌های سرور (کسانی که «serve» اجرا می‌کنند)؛ اگر پورت هم می‌دانیم
+	// سروری که روی همان پورت است را برمی‌گردانیم.
+	var served []string
+	for _, u := range cands {
+		es := execOf(u)
+		if !strings.Contains(es, " serve ") {
+			continue
+		}
+		served = append(served, u)
+		if port != "" && strings.Contains(es, ":"+port) {
 			return u
 		}
 	}
-	if len(cands) > 0 {
-		return cands[0]
+	if len(served) > 0 {
+		return served[0]
+	}
+	// fallback: هر واحد opencode دیگری که روی همین پورت گوش می‌دهد
+	for _, u := range cands {
+		if port != "" && strings.Contains(execOf(u), ":"+port) {
+			return u
+		}
 	}
 	return ""
 }
@@ -270,6 +288,7 @@ func (e *ocEnv) currentModel() string {
 }
 
 // setModel تنظیم model و small_model در کانفیگ (با حفظ بقیه فایل)
+// خروجی همیشه JSON(C) معتبر است: بدون خط تکراری و با کامای درست بین کلیدها.
 func (e *ocEnv) setModel(full string) error {
 	full = strings.TrimSpace(full)
 	if !strings.Contains(full, "/") {
@@ -285,51 +304,66 @@ func (e *ocEnv) setModel(full string) error {
 	if err := os.MkdirAll(e.ConfigDir, 0o755); err != nil {
 		return err
 	}
-	writeModel := func(l, key, val string) string {
-		if m := reModelLine.FindStringSubmatch(l); m != nil && m[2] == key {
-			return fmt.Sprintf("%s\"%s\": \"%s\"%s", m[1], key, val, m[3])
-		}
-		return l
-	}
+	modelLine := fmt.Sprintf(`  "model": "%s",`, full)
+	smallLine := fmt.Sprintf(`  "small_model": "%s",`, full)
+
 	var out []string
-	haveModel, haveSmall := false, false
-	insertedSchema := false
+	inserted := false
 	for _, l := range lines {
-		switch {
-		case reModelLine.MatchString(l) && strings.Contains(l, `"model"`):
-			out = append(out, writeModel(l, "model", full))
-			haveModel = true
+		if m := reModelLine.FindStringSubmatch(l); m != nil {
+			// خطوط قدیمی model/small_model را حذف کن تا تکراری نمانند
 			continue
-		case reModelLine.MatchString(l) && strings.Contains(l, `"small_model"`):
-			out = append(out, writeModel(l, "small_model", full))
-			haveSmall = true
-			continue
-		case reSchema.MatchString(l) && !insertedSchema && !haveModel && !haveSmall:
+		}
+		if reSchema.MatchString(l) {
 			out = append(out, l)
-			out = append(out, fmt.Sprintf("  \"model\": \"%s\",", full))
-			out = append(out, fmt.Sprintf("  \"small_model\": \"%s\",", full))
-			insertedSchema = true
-			haveModel, haveSmall = true, true
+			out = append(out, modelLine)
+			out = append(out, smallLine)
+			inserted = true
 			continue
 		}
 		out = append(out, l)
 	}
-	if !haveModel || !haveSmall {
-		// هیچ خط model/schema ای نبود؛ به‌صورت امن به انتهای فایل (قبل از براکت بستن) اضافه کن
-		var tail []string
+	if !inserted {
+		// هیچ خط schema/modelی نبود؛ به‌صورت امن قبل از براکت بستن اضافه کن
 		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "}" {
-			tail = append(tail, out[len(out)-1])
-			out = out[:len(out)-1]
+			out = append(out[:len(out)-1], modelLine, smallLine, "}")
+		} else {
+			out = append([]string{"{", modelLine, smallLine, "}"}, out...)
 		}
-		if !haveModel {
-			out = append(out, fmt.Sprintf("  \"model\": \"%s\",", full))
-		}
-		if !haveSmall {
-			out = append(out, fmt.Sprintf("  \"small_model\": \"%s\",", full))
-		}
-		out = append(out, tail...)
 	}
+	out = fixJSONCLines(out)
 	return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o644)
+}
+
+// fixJSONCLines اطمینان از کاماگذاری درست بین کلیدهای JSON(C)
+// هر خط کلید/مقدار بدون کاما که خط بعدی‌اش بستن براکت نیست، کاما می‌گیرد.
+func fixJSONCLines(lines []string) []string {
+	var out []string
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "" || !strings.Contains(t, `":`) || strings.HasPrefix(t, "//") ||
+			strings.HasPrefix(t, "/*") || t == "}" || strings.HasSuffix(t, "{") || strings.HasSuffix(t, "}") {
+			out = append(out, l)
+			continue
+		}
+		hasComma := strings.HasSuffix(t, ",")
+		next := ""
+		for _, n := range lines[i+1:] {
+			if nt := strings.TrimSpace(n); nt != "" {
+				next = nt
+				break
+			}
+		}
+		switch {
+		case next == "}":
+			out = append(out, strings.TrimSuffix(strings.TrimSpace(l), ","))
+		case hasComma:
+			out = append(out, l)
+		default:
+			out = append(out, t+",")
+		}
+	}
+	return out
 }
 
 // restart ری‌استارت سرویس systemd سرور opencode

@@ -65,6 +65,50 @@ func TestSetModelRejectsBadFormat(t *testing.T) {
 	}
 }
 
+// TestSetModelProducesValidJSONC: خروجی setModel باید JSON(C) معتبر و بدون
+// خط تکراری باشد (کاماهای درست). باگ قبلی: خط `$schema` بدون کاما و تکرار
+// model/small_model که باعث می‌شد opencode serve از استارت بایستد.
+func TestSetModelProducesValidJSONC(t *testing.T) {
+	e := mkScratchOCEnv(t)
+	// فایلی شبیه به چیزی که نسخه‌های قدیمی بات می‌ساختند (کامای $schema جا مانده)
+	broken := "{\n  \"$schema\": \"https://opencode.ai/config.json\"\n  \"model\": \"opencode/big-pickle\",\n  \"small_model\": \"opencode/big-pickle\",\n  \"model\": \"opencode/big-pickle\",\n  \"small_model\": \"opencode/big-pickle\"\n}\n"
+	if err := os.WriteFile(e.configPath(), []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.setModel("openrouter/openrouter/free"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(e.configPath())
+	s := string(b)
+	if got := strings.Count(s, `"model":`); got != 1 {
+		t.Fatalf("model باید یک بار باشد، شد %d:\n%s", got, s)
+	}
+	if got := strings.Count(s, `"small_model":`); got != 1 {
+		t.Fatalf("small_model باید یک بار باشد، شد %d:\n%s", got, s)
+	}
+	// کامای $schema باید ست شود و خط آخر (small_model) کاما نداشته باشد
+	if !strings.Contains(s, "config.json\",") {
+		t.Fatalf("کامای $schema نبود:\n%s", s)
+	}
+	if strings.Contains(s, ",,\n") || strings.Contains(s, ",,\r\n") {
+		t.Fatalf("کامای دوبل:\n%s", s)
+	}
+}
+
+func TestHasKeyForKeylessProvider(t *testing.T) {
+	e := mkScratchOCEnv(t)
+	// پروایدر opencode به کلید نیاز ندارد
+	if !e.hasKey("opencode") {
+		t.Fatal("opencode باید بدون کلید ready تلقی شود")
+	}
+	if !e.isKeyless("opencode") {
+		t.Fatal("isKeyless(opencode) باید true باشد")
+	}
+	if e.isKeyless("openrouter") {
+		t.Fatal("isKeyless(openrouter) باید false باشد")
+	}
+}
+
 func TestAuthKeyCRUD(t *testing.T) {
 	e := mkScratchOCEnv(t)
 	if e.hasKey("deepseek") {
